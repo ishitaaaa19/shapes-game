@@ -22,6 +22,8 @@ export class GameComponent implements OnInit {
   private playerId!: string;
   private draggedShapes!: any[]
   private playerShapeMap = new Map<string, string[]>();
+  private hasDraggedShapes: boolean = false;
+  private sendButton: Button | null = null;
 
   constructor() {
 
@@ -32,7 +34,7 @@ export class GameComponent implements OnInit {
     const canvas = this.renderCanvas.nativeElement;
     this.engine = new BABYLON.Engine(canvas, true);
     await this.initBabylonScene()
-    // Only set up room events if room is already available
+
     if (this.room) {
       this.roomEvents();
     }
@@ -68,6 +70,8 @@ export class GameComponent implements OnInit {
     try {
       let client = new Client("http://localhost:2567");
       this.room = await client.joinOrCreate("my_room");
+
+      this.playerId = this.room.sessionId;
 
       if (!this.room) {
         throw new Error(" Room is still undefined after joining.");
@@ -116,6 +120,13 @@ export class GameComponent implements OnInit {
 
   }
 
+  private updateSendButtonState() {
+    if (this.sendButton) {
+      this.sendButton.isEnabled = this.hasDraggedShapes;
+    }
+  }
+
+
   addSendBtn() {
 
     if (!this.scene) {
@@ -124,28 +135,92 @@ export class GameComponent implements OnInit {
     }
 
     var gui = AdvancedDynamicTexture.CreateFullscreenUI("myUI");
-    var button = Button.CreateSimpleButton("button", "Send");
-    button.top = "-180px";
-    button.left = "120px";
-    button.width = "100px";
-    button.height = "30px";
-    button.cornerRadius = 20;
-    button.thickness = 4;
-    button.children[0].color = "#DFF9FB";
-    button.children[0].fontSize = 20;
-    button.color = "#FF7979";
-    button.background = "#EB4D4B";
+    this.sendButton = Button.CreateSimpleButton("sendButton", "Send");
+    this.sendButton.top = "-180px";
+    this.sendButton.left = "120px";
+    this.sendButton.width = "100px";
+    this.sendButton.height = "30px";
+    this.sendButton.cornerRadius = 20;
+    this.sendButton.thickness = 4;
+    this.sendButton.children[0].color = "#DFF9FB";
+    this.sendButton.children[0].fontSize = 20;
+    this.sendButton.color = "#FF7979";
+    this.sendButton.background = "#EB4D4B";
 
-    button.onPointerClickObservable.add(() => {
+    this.sendButton.isEnabled = false;
+
+    this.sendButton.onPointerClickObservable.add(() => {
+      if (!this.hasDraggedShapes || this.draggedShapes.length === 0) return;
+
+      console.log(" Sending shapes:", this.draggedShapes);
+
       this.room.send("sendShapes", {
         shapes: this.draggedShapes,
         playerId: this.playerId
-      })
+      });
+
+      // this.listenForShapeUpdates(this.playerId);
+
+      // Reset draggedShapes and disable the send button
+      this.draggedShapes = [];
+      this.hasDraggedShapes = false;
+      this.updateSendButtonState();
 
     });
 
-    gui.addControl(button);
+    gui.addControl(this.sendButton);
   }
+
+  private newlyReceivedShapes(shapeId: string, playerId: string) {
+    console.log(`Creating shape ${shapeId} for Player ${playerId}`);
+
+    // Retrieve shape data (if you store extra details in Colyseus state)
+    const shapeData = this.room.state.shapes?.get(shapeId);
+
+    let shape;
+    if (shapeData?.shapeType === "circle") {
+      shape = BABYLON.MeshBuilder.CreateSphere(`shape-${shapeId}`, { diameter: 0.8 }, this.scene);
+    } else if (shapeData?.shapeType === "square") {
+      shape = BABYLON.MeshBuilder.CreateBox(`shape-${shapeId}`, { size: 1 }, this.scene);
+    } else {
+      shape = BABYLON.MeshBuilder.CreateCapsule(`shape-${shapeId}`, { radius: 0.5, tessellation: 3 }, this.scene);
+      shape.rotation = new BABYLON.Vector3(0, Math.PI / 3, 0);
+     
+    }
+
+    // Set shape position (adjust as needed)
+    shape.position = new BABYLON.Vector3(Math.random() * 4 - 2, 1, Math.random() * 4 - 2);
+
+    // Store in player's shape map
+    // if (!this.shapesMap.has(playerId)) {
+    //     this.shapesMap.set(playerId, []);
+    // }
+    this.shapesMap.get(playerId)?.set(shapeId,shape);
+
+    console.log(`Shape ${shapeId} created for Player ${playerId}`);
+  }
+
+  private listenForShapeUpdates(playerId: string) {
+    const $ = getStateCallbacks(this.room);
+
+    const player = this.room.state.players.get(playerId);
+    if (!player) return;
+
+    console.log(` Listening for shape updates for Player: ${playerId}`);
+
+    // $(player)['shapeIds'].onAdd((shapeId: string) => {
+    //     console.log(` New shape received: ${shapeId} for Player ${playerId}`);
+
+    //     // Ensure only NEW shapes are created
+    //     if (!this.shapesMap.get(playerId)?.has(shapeId)) {
+    //         this.newlyReceivedShapes(shapeId, playerId);
+    //     } else {
+    //         console.warn(` Shape ${shapeId} already exists for Player ${playerId}, skipping duplicate.`);
+    //     }
+    // });
+}
+
+
 
   private roomEvents() {
     const $ = getStateCallbacks(this.room);
@@ -154,14 +229,14 @@ export class GameComponent implements OnInit {
     let shapesInitialized = false;
 
     $(this.room.state)['players'].onAdd((player, sessionId) => {
-      this.playerId = sessionId;
       console.log(`Player added - ID: ${sessionId}, Name: ${player.player_name}`);
 
       if (this.room.state.players.size === 4 && !shapesInitialized) {
-            shapesInitialized = true;
-            this.createPlayerShapes(sessionId);
+        shapesInitialized = true;
+        this.createPlayerShapes(sessionId);
         this.enableDragging();
       }
+
     });
 
     $(this.room.state)['players'].onRemove((_, sessionId) => {
@@ -169,6 +244,17 @@ export class GameComponent implements OnInit {
       this.cleanupPlayerShapes(sessionId);
       shapesInitialized = false;
     });
+
+    this.room.onMessage('shapeTransfer', (data) => {
+      // console.log(` Broadcast Received: Shapes sent from ${data.senderId} to ${data.receiverId}:`, data.shapes);
+  
+      console.log("playerid=>", this.playerId , "receiver id=>", data.receiverId)
+      if (this.playerId === data.receiverId) {
+          console.log(` You received shapes:`, data.shapes);
+          data.shapes.forEach((shapeId : any) => this.newlyReceivedShapes(shapeId, data.receiverId));
+      }
+  });
+  
 
   }
 
@@ -240,16 +326,16 @@ export class GameComponent implements OnInit {
     // console.log(` Total shapes assigned to Player ${playerId}:`, assignedShapes);
   }
 
-private cleanupPlayerShapes(playerId: string): void {
+  private cleanupPlayerShapes(playerId: string): void {
     // Remove from scene
     const prefix = `p${playerId}_`;
     this.scene.meshes
-        .filter(m => m.name.startsWith(prefix))
-        .forEach(m => m.dispose());
-    
+      .filter(m => m.name.startsWith(prefix))
+      .forEach(m => m.dispose());
+
     // Remove from tracking
     this.playerShapeMap.delete(playerId);
-}
+  }
 
   private enableDragging(): void {
     this.scene.onPointerDown = (evt, pickResult) => {
@@ -275,16 +361,17 @@ private cleanupPlayerShapes(playerId: string): void {
     this.scene.onPointerUp = () => {
 
       if (this.pickedMesh) {
-        const blueZone = this.scene.getMeshByName("selectionSend")
-        if (this.pickedMesh.intersectsMesh(blueZone, false)) {
+        const sendZone = this.scene.getMeshByName("selectionSend");
+        if (this.pickedMesh.intersectsMesh(sendZone, false)) {
           console.log(` Shape ${this.pickedMesh.id} inside Blue Zone`);
-          this.draggedShapes?.push(this.pickedMesh.id);
-          console.log(this.draggedShapes)
 
-          // Set grid layout
+          if (!this.draggedShapes.includes(this.pickedMesh.id)) {
+            this.draggedShapes.push(this.pickedMesh.id);
+          }
 
-        } else {
-
+          // Enable the send button since at least one shape was dragged
+          this.hasDraggedShapes = true;
+          this.updateSendButtonState();
         }
       }
       this.pickedMesh = null;
